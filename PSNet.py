@@ -363,8 +363,6 @@ class FWM(nn.Module):
         mul1 = torch.mul(sa, conv_high)
         mul2 = torch.mul(ca, conv_low)
 
-        # mul1 = mul1 + conv_high
-        # mul2 = mul2 + conv_low
         att_out = mul1 + mul2
 
         cat_f = torch.cat((conv_high, conv_low, att_out), dim=1)
@@ -377,3 +375,93 @@ class FWM(nn.Module):
 
         APF = self.apf(att_out)
         return APF
+class SpatialAttention(nn.Module):
+    def __init__(self, in_ch, out_ch, droprate=0.15):
+        super(SpatialAttention, self).__init__()
+        self.conv_sh = nn.Conv2d(in_ch, in_ch, kernel_size=1, stride=1, padding=0)
+        self.bn_sh1 = nn.BatchNorm2d(in_ch)
+        self.bn_sh2 = nn.BatchNorm2d(in_ch)
+        self.conv_res = nn.Conv2d(in_ch, in_ch, kernel_size=1, stride=1, padding=0)
+        self.drop = droprate
+        self.fuse = conv_block(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bn_act=False)
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        # print(x.size())
+        # torch.Size([6, 256, 20, 20])
+
+        mxpool = F.max_pool2d(x, [h, 1])  # .view(b,c,-1).permute(0,2,1)
+        # print(mxpool.size())  #torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+        mxpool = F.conv2d(mxpool, self.conv_sh.weight, padding=0, dilation=1)
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+        mxpool = self.bn_sh1(mxpool)
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+
+        avgpool = F.avg_pool2d(x, [h, 1])  # .view(b,c,-1)
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+        avgpool = F.conv2d(avgpool, self.conv_sh.weight, padding=0, dilation=1)
+        avgpool = self.bn_sh2(avgpool)
+
+        att = torch.softmax(torch.mul(mxpool, avgpool), 1)
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+        attt1 = att[:, 0, :, :].unsqueeze(1)
+        # torch.Size([6, 1, 1, 20])
+        # torch.Size([6, 1, 1, 40])
+        # torch.Size([6, 1, 1, 80])
+        # torch.Size([6, 1, 1, 160])
+        attt2 = att[:, 1, :, :].unsqueeze(1)
+        # print(attt2.size())
+        # torch.Size([6, 1, 1, 20])
+        # torch.Size([6, 1, 1, 40])
+        # torch.Size([6, 1, 1, 80])
+        # torch.Size([6, 1, 1, 160])
+
+        fusion = attt1 * avgpool + attt2 * mxpool
+        # print(fusion.size())
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+
+        out = F.dropout(self.fuse(fusion), p=self.drop, training=self.training)
+        # print(out.size())
+        # torch.Size([6, 256, 1, 20])
+        # torch.Size([6, 128, 1, 40])
+        # torch.Size([6, 64, 1, 80])
+        # torch.Size([6, 32, 1, 160])
+
+        out = F.relu(self.gamma * out + (1 - self.gamma) * x)
+        # print(out.size())
+        return out
+
+
+class ChannelWise(nn.Module):
+    def __init__(self, channel, reduction=4):
+        super(ChannelWise, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv_pool = nn.Sequential(
+            conv_block(channel, channel // reduction, 1, 1, padding=0, bias=False), nn.ReLU(inplace=False),
+            conv_block(channel // reduction, channel, 1, 1, padding=0, bias=False), nn.Sigmoid())
+
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = self.conv_pool(y)
+
+        return x * y
