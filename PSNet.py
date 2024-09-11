@@ -13,7 +13,7 @@ from Models1.utils import conv_bn_relu
 
 class PSNet(nn.Module):
     def __init__(self, backbone,  sync_bn=True, pretrained=True, ResNet34M= False, criterion=nn.CrossEntropyLoss(ignore_index=255), classes = 6):
-        super(SSFPN, self).__init__()
+        super(PSNet, self).__init__()
         self.ResNet34M = ResNet34M
         self.backbone = backbone
         self.criterion = criterion
